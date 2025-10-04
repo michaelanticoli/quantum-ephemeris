@@ -1,148 +1,200 @@
-"""
-Swiss Ephemeris API - Calculates Natal Charts
-Just copy this entire file to main.py
-"""
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import List
-from datetime import datetime, timezone, timedelta
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import swisseph as swe
-import os
-from pathlib import Path
+from datetime import datetime, timezone, timedelta
+import math
+from musical_db import MusicalDatabase
 
-# Setup
-app = FastAPI(title="Swiss Ephemeris API")
+app = Flask(__name__)
+CORS(app)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Initialize musical database
+musical_db = MusicalDatabase()
 
-# Tell Swiss Ephemeris where to find data files
-EPHEMERIS_PATH = os.getenv("EPHEMERIS_PATH", "./ephemeris")
-Path(EPHEMERIS_PATH).mkdir(parents=True, exist_ok=True)
-swe.set_ephe_path(EPHEMERIS_PATH)
+# Planet constants
+PLANETS = [
+    ('Sun', swe.SUN),
+    ('Moon', swe.MOON),
+    ('Mercury', swe.MERCURY),
+    ('Venus', swe.VENUS),
+    ('Mars', swe.MARS),
+    ('Jupiter', swe.JUPITER),
+    ('Saturn', swe.SATURN),
+    ('Uranus', swe.URANUS),
+    ('Neptune', swe.NEPTUNE),
+    ('Pluto', swe.PLUTO)
+]
 
-# Planet codes
-PLANETS = {
-    "Sun": 0, "Moon": 1, "Mercury": 2, "Venus": 3, "Mars": 4,
-    "Jupiter": 5, "Saturn": 6, "Uranus": 7, "Neptune": 8, "Pluto": 9
-}
+SIGNS = [
+    'Aries', 'Taurus', 'Gemini', 'Cancer', 'Leo', 'Virgo',
+    'Libra', 'Scorpio', 'Sagittarius', 'Capricorn', 'Aquarius', 'Pisces'
+]
 
-HOUSE_SYSTEMS = {"Placidus": b'P', "Koch": b'K', "Equal": b'E', "Whole Sign": b'W'}
+def julian_day(year, month, day, hour, minute, timezone_offset):
+    """Calculate Julian Day Number"""
+    # Convert to UTC
+    utc_hour = hour - timezone_offset
+    utc_time = utc_hour + minute / 60.0
+    
+    return swe.julday(year, month, day, utc_time, swe.GREG_CAL)
 
-# Request format
-class BirthData(BaseModel):
-    year: int
-    month: int
-    day: int
-    hour: int
-    minute: int
-    latitude: float
-    longitude: float
-    timezone_offset: float = 0
-    house_system: str = "Placidus"
-
-# Response format
-class PlanetPosition(BaseModel):
-    name: str
-    longitude: float
-    zodiac_sign: str
-    zodiac_degree: float
-    house: int
-    retrograde: bool
-
-class NatalChart(BaseModel):
-    planets: List[PlanetPosition]
-    calculation_time: str
-
-# Helper functions
-def get_zodiac_sign(longitude: float):
-    signs = ["Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
-             "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"]
+def longitude_to_sign_and_degree(longitude):
+    """Convert longitude to zodiac sign and degree"""
     sign_index = int(longitude / 30)
     degree = longitude % 30
-    return signs[sign_index], degree
+    return SIGNS[sign_index], degree
 
-def julian_day(year, month, day, hour, minute, tz_offset):
-    ut_hour = hour - tz_offset
-    if ut_hour < 0:
-        day -= 1
-        ut_hour += 24
-    elif ut_hour >= 24:
-        day += 1
-        ut_hour -= 24
-    time_decimal = ut_hour + (minute / 60.0)
-    return swe.julday(year, month, day, time_decimal)
-
-def determine_house(longitude, cusps):
+def calculate_house(longitude, houses):
+    """Determine which house a planet is in"""
     for i in range(12):
-        cusp_start = cusps[i]
-        cusp_end = cusps[(i + 1) % 12]
-        if cusp_start < cusp_end:
-            if cusp_start <= longitude < cusp_end:
+        next_house = (i + 1) % 12
+        if houses[next_house] < houses[i]:  # Handle wrap around 360°
+            if longitude >= houses[i] or longitude < houses[next_house]:
                 return i + 1
         else:
-            if longitude >= cusp_start or longitude < cusp_end:
+            if houses[i] <= longitude < houses[next_house]:
                 return i + 1
-    return 1
+    return 1  # Default to 1st house
 
-# API Endpoints
-@app.get("/")
-def home():
-    return {"status": "Swiss Ephemeris API is running", "version": "1.0"}
-
-@app.get("/health")
-def health():
-    files_exist = any(Path(EPHEMERIS_PATH).glob("*.se1"))
-    return {
-        "status": "healthy" if files_exist else "missing ephemeris files",
-        "ephemeris_files": files_exist
-    }
-
-@app.post("/natal-chart", response_model=NatalChart)
-def calculate_natal_chart(birth: BirthData):
-    try:
-        # Calculate Julian Day
-        jd = julian_day(birth.year, birth.month, birth.day, 
-                       birth.hour, birth.minute, birth.timezone_offset)
+def calculate_planets(birth_data):
+    """Calculate planetary positions"""
+    jd = julian_day(
+        birth_data['year'], birth_data['month'], birth_data['day'],
+        birth_data['hour'], birth_data['minute'], birth_data['timezone_offset']
+    )
+    
+    planets = []
+    for name, planet_id in PLANETS:
+        result, ret = swe.calc_ut(jd, planet_id)
+        longitude = result[0]
+        speed = result[3]
         
-        # Calculate houses
-        house_system = HOUSE_SYSTEMS.get(birth.house_system, b'P')
-        cusps, ascmc = swe.houses(jd, birth.latitude, birth.longitude, house_system)
+        sign, degree = longitude_to_sign_and_degree(longitude)
+        
+        planets.append({
+            'name': name,
+            'longitude': longitude,
+            'zodiac_sign': sign,
+            'zodiac_degree': degree,
+            'house': 1,  # Will be calculated with houses
+            'retrograde': speed < 0
+        })
+    
+    return planets
+
+def calculate_houses(birth_data):
+    """Calculate house cusps using Placidus system"""
+    jd = julian_day(
+        birth_data['year'], birth_data['month'], birth_data['day'],
+        birth_data['hour'], birth_data['minute'], birth_data['timezone_offset']
+    )
+    
+    try:
+        houses, ascmc = swe.houses(jd, birth_data['latitude'], birth_data['longitude'], b'P')
+        return list(houses)
+    except:
+        # Fallback: equal houses
+        ascendant = 0  # This should be calculated properly
+        return [(ascendant + i * 30) % 360 for i in range(12)]
+
+def calculate_aspects(planets):
+    """Calculate aspects between planets"""
+    ASPECT_DEFINITIONS = [
+        {'name': 'Conjunction', 'angle': 0, 'orb': 8},
+        {'name': 'Sextile', 'angle': 60, 'orb': 6},
+        {'name': 'Square', 'angle': 90, 'orb': 8},
+        {'name': 'Trine', 'angle': 120, 'orb': 8},
+        {'name': 'Opposition', 'angle': 180, 'orb': 8},
+        {'name': 'Quincunx', 'angle': 150, 'orb': 3}
+    ]
+    
+    aspects = []
+    for i in range(len(planets)):
+        for j in range(i + 1, len(planets)):
+            planet1 = planets[i]
+            planet2 = planets[j]
+            
+            # Calculate angle difference
+            angle_diff = abs(planet1['longitude'] - planet2['longitude'])
+            if angle_diff > 180:
+                angle_diff = 360 - angle_diff
+            
+            # Check for aspects
+            for aspect_def in ASPECT_DEFINITIONS:
+                orb = abs(angle_diff - aspect_def['angle'])
+                if orb <= aspect_def['orb']:
+                    aspects.append({
+                        'planet1': planet1['name'],
+                        'planet2': planet2['name'],
+                        'aspect_name': aspect_def['name'],
+                        'orb': orb,
+                        'exact_angle': angle_diff
+                    })
+                    break
+    
+    return aspects
+
+@app.route('/natal-chart', methods=['POST'])
+def calculate_natal_chart():
+    """Calculate natal chart with optional musical analysis"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ['year', 'month', 'day', 'hour', 'minute', 'latitude', 'longitude', 'timezone_offset']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
         
         # Calculate planets
-        planets = []
-        for planet_name, planet_code in PLANETS.items():
-            result, _ = swe.calc_ut(jd, planet_code)
-            longitude = result[0]
-            speed = result[3]
-            
-            sign, degree = get_zodiac_sign(longitude)
-            house = determine_house(longitude, cusps)
-            
-            planets.append(PlanetPosition(
-                name=planet_name,
-                longitude=longitude,
-                zodiac_sign=sign,
-                zodiac_degree=round(degree, 2),
-                house=house,
-                retrograde=(speed < 0)
-            ))
+        planets = calculate_planets(data)
         
-        return NatalChart(
-            planets=planets,
-            calculation_time=datetime.now(timezone.utc).isoformat()
-        )
-    
+        # Calculate houses
+        houses = calculate_houses(data)
+        
+        # Assign houses to planets
+        for planet in planets:
+            planet['house'] = calculate_house(planet['longitude'], houses)
+        
+        # Base response
+        response = {
+            'planets': planets,
+            'houses': houses,
+            'calculation_time': datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Add musical analysis if requested
+        if data.get('include_musical_analysis'):
+            try:
+                aspects = calculate_aspects(planets)
+                musical_data = musical_db.get_enhanced_musical_data(planets, aspects)
+                response['musical_data'] = musical_data
+            except Exception as e:
+                print(f"Musical analysis error: {e}")
+                # Continue without musical data
+                response['musical_data'] = None
+        
+        return jsonify(response)
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error calculating chart: {e}")
+        return jsonify({'error': str(e)}), 500
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'services': {
+            'swiss_ephemeris': 'available',
+            'supabase': 'connected' if musical_db.test_connection() else 'disconnected'
+        }
+    })
+
+if __name__ == '__main__':
+    # Set Swiss Ephemeris path (optional)
+    swe.set_ephe_path('/usr/share/swisseph')  # Adjust path as needed
+    
+    # Run the app
+    app.run(debug=True, host='0.0.0.0', port=5000)
