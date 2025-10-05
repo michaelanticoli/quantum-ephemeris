@@ -6,7 +6,7 @@ import os
 class MusicalDatabase:
     def __init__(self):
         # Replace [YOUR-PASSWORD] with your actual Supabase password
-        self.connection_string = "postgresql://postgres:[YOUR-PASSWORD]@db.pqxnvninbjjzddppaebf.supabase.co:5432/postgres"
+        self.connection_string = "postgresql://postgres:[=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxeG52bmluYmpqemRkcHBhZWJmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDc1Mjk3ODYsImV4cCI6MjA2MzEwNTc4Nn0.iuND4AopQqkzm3sryd9_jPyh23C7m49-wz45tViH4Xg]@db.pqxnvninbjjzddppaebf.supabase.co:5432/postgres"
     
     def get_connection(self):
         """Get database connection"""
